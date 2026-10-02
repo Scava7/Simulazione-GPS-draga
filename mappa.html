@@ -38,6 +38,7 @@
     .dredger-leaflet-icon { background: transparent; border: 0; }
     .dredger-leaflet-icon { overflow: visible; }
     .dredger-image { display: block; width: 72px; height: 72px; object-fit: contain; }
+    .grid-cell-error { fill: #d73027; fill-opacity: .32; color: #a51f1a; weight: 2; }
     .refpoint-icon { background: transparent; border: 0; }
     .refpoint-badge { display: flex; width: 28px; height: 28px; align-items: center; justify-content: center;
                        border: 2px solid white; border-radius: 50%; color: white; background: #a51f1a;
@@ -68,6 +69,7 @@
 
     <h2>Letture OPC UA — PLC</h2>
     <div class="coordinates" id="opcua-status">Connessione OPC UA in avvio…</div>
+    <div class="coordinates" id="grid-status" style="margin-top:8px">Reticolo PLC: in attesa dei dati</div>
     <div class="coordinates" style="margin-top:8px">
       <strong>Offset UTM</strong>
       <div id="opc-utm-north-offset">UTM_North_Offset: —</div>
@@ -107,6 +109,8 @@
     L.control.scale({ position: "bottomleft", metric: true, imperial: false }).addTo(map);
     let dredgerMarker = null;
     const refPointLayer = L.layerGroup().addTo(map);
+    const gridCellLayer = L.layerGroup().addTo(map);
+    const gridCellLayers = new Map();
     let refPointMarkers = [];
     const refPointOutline = L.polyline([], {
       color: "#1457c5", weight: 3, opacity: 0.9, interactive: false
@@ -173,6 +177,62 @@
         box.className = `coordinates${data.error ? " error" : " success"}`;
         if (data.coordinates_error) {
           box.textContent += ` · Punti: ${data.coordinates_error}`;
+        }
+        const gridStatus = document.getElementById("grid-status");
+        gridStatus.textContent = `Reticolo PLC: ${data.grid_status ?? "in attesa dei dati"}`;
+        gridStatus.className = `coordinates${(data.grid_status ?? "").startsWith("Errore") ? " error" : ""}`;
+        if (Array.isArray(data.grid_cells)) {
+          const visibleKeys = new Set();
+          for (const cell of data.grid_cells) {
+            const key = `${cell.row},${cell.column}`;
+            visibleKeys.add(key);
+            const style = {
+              color: cell.error ? "#a51f1a" : "#1769aa",
+              weight: cell.error ? 2.5 : 1.5,
+              opacity: 0.9,
+              fillColor: cell.error ? "#d73027" : "#42a5f5",
+              fillOpacity: cell.error ? 0.35 : 0.16
+            };
+            const tooltip = `Cella [${cell.row}][${cell.column}] · Percorso ${cell.path_index}` +
+              `<br>Profondità iniziale: ${cell.first_depth_read_cm} cm` +
+              `<br>Ultima profondità: ${cell.last_depth_read_cm} cm` +
+              `<br>Target: ${cell.target_depth_cm} cm` +
+              `<br>Bordi attraversati: ${cell.edges_crossed}` +
+              `<br>Errore: ${cell.error ? "sì" : "no"}`;
+            let polygon = gridCellLayers.get(key);
+            const cornersKey = JSON.stringify(cell.corners);
+            const styleKey = JSON.stringify(style);
+            if (!polygon) {
+              polygon = L.polygon(cell.corners, style)
+                .bindTooltip(tooltip, { permanent: false, sticky: true })
+                .addTo(gridCellLayer);
+              polygon._gridCornersKey = cornersKey;
+              polygon._gridStyleKey = styleKey;
+              polygon._gridTooltipContent = tooltip;
+              gridCellLayers.set(key, polygon);
+            } else {
+              // Avoid redrawing/rebinding unchanged cells on every OPC UA refresh:
+              // doing so can close the tooltip while the pointer remains over the cell.
+              if (polygon._gridCornersKey !== cornersKey) {
+                polygon.setLatLngs(cell.corners);
+                polygon._gridCornersKey = cornersKey;
+              }
+              if (polygon._gridStyleKey !== styleKey) {
+                polygon.setStyle(style);
+                polygon._gridStyleKey = styleKey;
+              }
+              if (polygon._gridTooltipContent !== tooltip) {
+                polygon.getTooltip().setContent(tooltip);
+                polygon._gridTooltipContent = tooltip;
+              }
+            }
+          }
+          for (const [key, polygon] of gridCellLayers) {
+            if (!visibleKeys.has(key)) {
+              gridCellLayer.removeLayer(polygon);
+              gridCellLayers.delete(key);
+            }
+          }
         }
         if (data.ref_points) {
           const outline = data.ref_points.map(point => [point.lat, point.lon]);

@@ -31,6 +31,20 @@ HTML_PATH = Path(__file__).with_name("mappa.html")
 CURSOR_IMAGE_PATH = Path(__file__).with_name("DRP ombra.png")
 OPCUA_ENDPOINT = "opc.tcp://192.168.10.30:4840"
 OPCUA_POLL_SECONDS = 1
+GRID_POLL_SECONDS = 5
+GRID_ROWS = 25  # array PLC esportato come [0..24][0..24]
+GRID_COLUMNS = 25
+GRID_READ_BATCH_SIZE = 100  # limite operativo osservato sul server OPC UA del PLC
+GRID_CELL_PROPERTIES = (
+    "Path_Index",
+    "First_Depth_Read_cm",
+    "Last_Depth_Read_cm",
+    "Target_Depth_cm",
+    "Center_Relative_North_dm",
+    "Center_Relative_East_dm",
+    "Edges_Crossed",
+    "Error",
+)
 OPCUA_TAGS = {
     "UTM_North_Offset": ["IO", "GPS", "Sts", "UTM_North_Offset"],
     "UTM_East_Offset": ["IO", "GPS", "Sts", "UTM_East_Offset"],
@@ -51,6 +65,9 @@ class AppState:
         self.opcua_values: dict[str, Any] = {}
         self.opcua_error = "Connessione al PLC in corso…"
         self.opcua_updated_at: float | None = None
+        self.grid_cells: list[dict[str, Any]] = []
+        self.grid_status = "Lettura reticolo OPC UA in corso…"
+        self.grid_updated_at: float | None = None
 
     def tcp_message(self) -> bytes:
         with self.lock:
@@ -160,18 +177,24 @@ async def _resolve_opcua_nodes(client):
     sts = await _find_child(gps, "Sts")
     cfg = await _find_child(gps, "Cfg")
     ref_points = await _find_child(cfg, "stRef_Points")
+    grid_root = await _browse_symbol_path(client.nodes.objects, ["GVL", "GPS_Grid_data"])
     return {
         "UTM_North_Offset": await _find_child(sts, "UTM_North_Offset"),
         "UTM_East_Offset": await _find_child(sts, "UTM_East_Offset"),
         "UTM_North_ref_points": await _find_child(ref_points, "UTM_North"),
         "UTM_East_ref_points": await _find_child(ref_points, "UTM_East"),
         "UTM_Zone": await _find_child(cfg, "UTM_Zone"),
+        "Grid_Cell_Size_dm": await _find_child(sts, "Grid_Cell_Size_dm"),
+        "GPS_Grid_Loaded_Properly": await _find_child(sts, "GPS_Grid_Loaded_Properly"),
+        "GPS_Grid_data": grid_root,
     }
 
 
 async def _read_opcua_values(nodes) -> dict[str, Any]:
     values: dict[str, Any] = {}
     for name, node in nodes.items():
+        if name == "GPS_Grid_data":
+            continue
         value = await node.read_value()
         if name in ("UTM_North_ref_points", "UTM_East_ref_points"):
             if not isinstance(value, (list, tuple)):
@@ -179,9 +202,110 @@ async def _read_opcua_values(nodes) -> dict[str, Any]:
             values[name] = [int(item) for item in value[:4]]
             if len(values[name]) != 4:
                 raise RuntimeError(f"{name} contiene meno di 4 elementi")
+        elif name == "Grid_Cell_Size_dm":
+            values[name] = float(value)
+        elif name == "GPS_Grid_Loaded_Properly":
+            values[name] = bool(value)
         else:
             values[name] = int(value)
     return values
+
+
+async def _read_values_in_batches(client, nodes):
+    values = []
+    for start in range(0, len(nodes), GRID_READ_BATCH_SIZE):
+        values.extend(await client.get_values(nodes[start:start + GRID_READ_BATCH_SIZE]))
+    return values
+
+
+async def _read_grid_cells(client, grid_root, values):
+    namespace = grid_root.nodeid.NamespaceIndex
+    identifier = grid_root.nodeid.Identifier
+
+    def cell_node(row, column, prop):
+        node_id = f"ns={namespace};s={identifier}[{row}][{column}].{prop}"
+        return client.get_node(node_id)
+
+    all_indices = [(row, column) for row in range(GRID_ROWS) for column in range(GRID_COLUMNS)]
+    included_nodes = [cell_node(row, column, "Included") for row, column in all_indices]
+    included_values = await _read_values_in_batches(client, included_nodes)
+    included = [
+        index for index, value in zip(all_indices, included_values)
+        if value is True
+    ]
+
+    requested_nodes = [
+        cell_node(row, column, prop)
+        for row, column in included
+        for prop in GRID_CELL_PROPERTIES
+    ]
+    raw_values = await _read_values_in_batches(client, requested_nodes)
+
+    north_offset_m = int(values["UTM_North_Offset"]) / _coordinate_units_per_meter(
+        int(values["UTM_North_Offset"])
+    )
+    east_offset_m = int(values["UTM_East_Offset"]) / _coordinate_units_per_meter(
+        int(values["UTM_North_Offset"])
+    )
+    zone = int(values["UTM_Zone"])
+    cell_size_dm = float(values["Grid_Cell_Size_dm"])
+    if cell_size_dm <= 0:
+        raise RuntimeError(f"Grid_Cell_Size_dm non valido: {cell_size_dm}")
+    half_size_m = cell_size_dm / 20.0
+
+    cells = []
+    invalid = []
+    stride = len(GRID_CELL_PROPERTIES)
+    for position, (row, column) in enumerate(included):
+        cell_values = dict(zip(
+            GRID_CELL_PROPERTIES,
+            raw_values[position * stride:(position + 1) * stride],
+        ))
+        north_dm = cell_values["Center_Relative_North_dm"]
+        east_dm = cell_values["Center_Relative_East_dm"]
+        if not _is_numeric_center(north_dm) or not _is_numeric_center(east_dm):
+            invalid.append(f"GPS_Grid_data[{row}][{column}]")
+            continue
+
+        northing_m = north_offset_m + float(north_dm) / 10.0
+        easting_m = east_offset_m + float(east_dm) / 10.0
+        corners_utm = [
+            (easting_m - half_size_m, northing_m - half_size_m),
+            (easting_m + half_size_m, northing_m - half_size_m),
+            (easting_m + half_size_m, northing_m + half_size_m),
+            (easting_m - half_size_m, northing_m + half_size_m),
+        ]
+        corners = [
+            list(utm.to_latlon(easting, northing, zone, northern=True))
+            for easting, northing in corners_utm
+        ]
+        cells.append({
+            "row": row,
+            "column": column,
+            "path_index": int(cell_values["Path_Index"] or 0),
+            "first_depth_read_cm": int(cell_values["First_Depth_Read_cm"] or 0),
+            "last_depth_read_cm": int(cell_values["Last_Depth_Read_cm"] or 0),
+            "target_depth_cm": int(cell_values["Target_Depth_cm"] or 0),
+            "edges_crossed": int(cell_values["Edges_Crossed"] or 0),
+            "error": bool(cell_values["Error"]),
+            "corners": corners,
+        })
+    return cells, invalid, len(included)
+
+
+def _is_numeric_center(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _coordinate_units_per_meter(north_raw: int) -> int:
+    magnitude = abs(north_raw)
+    if magnitude < 10_000_000:
+        return 1
+    if magnitude < 100_000_000:
+        return 10
+    if magnitude < 1_000_000_000:
+        return 100
+    return 1000
 
 
 def _reference_points_for_map(values: dict[str, Any]) -> list[dict[str, Any]]:
@@ -196,15 +320,7 @@ def _reference_points_for_map(values: dict[str, Any]) -> list[dict[str, Any]]:
     for index, (north_delta, east_delta) in enumerate(zip(norths, easts), start=1):
         north_raw = north_offset + int(north_delta)
         east_raw = east_offset + int(east_delta)
-        magnitude = abs(north_raw)
-        if magnitude < 10_000_000:
-            divisor = 1       # metri
-        elif magnitude < 100_000_000:
-            divisor = 10      # decimetri
-        elif magnitude < 1_000_000_000:
-            divisor = 100     # centimetri
-        else:
-            divisor = 1000    # millimetri
+        divisor = _coordinate_units_per_meter(north_raw)
 
         northing_m = north_raw / divisor
         easting_m = east_raw / divisor
@@ -227,8 +343,32 @@ async def _opcua_poll_loop(state: AppState):
         try:
             async with Client(url=OPCUA_ENDPOINT, timeout=5) as client:
                 nodes = await _resolve_opcua_nodes(client)
+                grid_root = nodes["GPS_Grid_data"]
+                next_grid_read = 0.0
                 while not state.stop_event.is_set():
                     values = await _read_opcua_values(nodes)
+                    now = time.monotonic()
+                    if now >= next_grid_read:
+                        try:
+                            cells, invalid, included_count = await _read_grid_cells(
+                                client, grid_root, values
+                            )
+                            grid_status = f"{included_count} celle incluse"
+                            if invalid:
+                                sample = ", ".join(invalid[:5])
+                                extra = "…" if len(invalid) > 5 else ""
+                                grid_status += f" · centri mancanti: {sample}{extra}"
+                            if not values["GPS_Grid_Loaded_Properly"]:
+                                grid_status += " · il PLC segnala reticolo non caricato"
+                            with state.lock:
+                                state.grid_cells = cells
+                                state.grid_status = grid_status
+                                state.grid_updated_at = time.time()
+                        except Exception as grid_exc:
+                            with state.lock:
+                                state.grid_status = f"Errore lettura reticolo: {grid_exc}"
+                        next_grid_read = time.monotonic() + GRID_POLL_SECONDS
+
                     with state.lock:
                         state.opcua_values = values
                         state.opcua_error = "Lettura attiva"
@@ -237,6 +377,7 @@ async def _opcua_poll_loop(state: AppState):
         except Exception as exc:
             with state.lock:
                 state.opcua_error = str(exc)
+                state.grid_status = f"Errore connessione OPC UA: {exc}"
             await asyncio.sleep(3)
 
 
@@ -287,9 +428,13 @@ class SimulatorHandler(BaseHTTPRequestHandler):
                 values = self.state.opcua_values.copy()
                 error = self.state.opcua_error
                 updated_at = self.state.opcua_updated_at
+                grid_cells = list(self.state.grid_cells)
+                grid_status = self.state.grid_status
+                grid_updated_at = self.state.grid_updated_at
             payload = {"ok": True, "values": values, "status": error,
                        "error": error if error != "Lettura attiva" else None,
-                       "updated_at": updated_at}
+                       "updated_at": updated_at, "grid_cells": grid_cells,
+                       "grid_status": grid_status, "grid_updated_at": grid_updated_at}
             if values:
                 try:
                     payload["ref_points"] = _reference_points_for_map(values)
