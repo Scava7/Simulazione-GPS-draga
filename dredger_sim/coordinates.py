@@ -45,3 +45,25 @@ def reference_points_for_map(values: dict[str, Any]) -> list[dict[str, Any]]:
             "raw_units_per_meter": divisor,
         })
     return points
+
+
+def target_point_for_map(values: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert the PLC relative target coordinates to a WGS84 map point."""
+    east_relative = int(values["Target_East"])
+    north_relative = int(values["Target_North"])
+    if east_relative == 0 and north_relative == 0:
+        return None
+
+    north_raw = int(values["UTM_North_Offset"]) + north_relative
+    east_raw = int(values["UTM_East_Offset"]) + east_relative
+    zone = int(values["UTM_Zone"])
+    divisor = coordinate_units_per_meter(north_raw)
+    northing_m = north_raw / divisor
+    easting_m = east_raw / divisor
+    lat, lon = utm.to_latlon(easting_m, northing_m, zone, northern=True)
+    return {
+        "lat": lat,
+        "lon": lon,
+        "easting_m": easting_m,
+        "northing_m": northing_m,
+    }

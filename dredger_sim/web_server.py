@@ -11,8 +11,8 @@ from typing import Any
 
 import utm
 
-from .config import COORDINATE_SCALE, CURSOR_IMAGE_PATH, HOST, HTML_PATH, TCP_PORT
-from .coordinates import reference_points_for_map
+from .config import COORDINATE_SCALE, CURSOR_IMAGE_PATH, HOST, HTML_PATH, TARGET_IMAGE_PATH, TCP_PORT
+from .coordinates import reference_points_for_map, target_point_for_map
 from .state import AppState
 from .tcp_server import _local_ipv4_addresses
 
@@ -47,6 +47,19 @@ class SimulatorHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path == "/gps.png":
+            try:
+                body = TARGET_IMAGE_PATH.read_bytes()
+            except OSError as exc:
+                self.send_error(404, f"Immagine del target non disponibile: {exc}")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/api/opcua/read":
             if not secrets.compare_digest(self.headers.get("X-App-Token", ""), self.state.token):
                 self._json_response(403, {"ok": False, "error": "Richiesta locale non autorizzata."})
@@ -61,11 +74,17 @@ class SimulatorHandler(BaseHTTPRequestHandler):
             payload = {"ok": True, "values": values, "status": error,
                        "error": error if error != "Lettura attiva" else None,
                        "updated_at": updated_at, "grid_cells": grid_cells,
-                       "grid_status": grid_status, "grid_updated_at": grid_updated_at}
+                       "grid_status": grid_status, "grid_updated_at": grid_updated_at,
+                       "target_point": None}
             norths = values.get("UTM_North_ref_points", [])
             easts = values.get("UTM_East_ref_points", [])
             points_configured = any(value != 0 for value in [*norths, *easts])
             payload["reference_points_configured"] = points_configured
+            if values:
+                try:
+                    payload["target_point"] = target_point_for_map(values)
+                except Exception as exc:
+                    payload["target_error"] = str(exc)
             if points_configured:
                 try:
                     payload["ref_points"] = reference_points_for_map(values)

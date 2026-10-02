@@ -46,6 +46,7 @@
     .dredger-image { display: block; width: 72px; height: 72px; object-fit: contain; }
     .grid-cell-error { fill: #d73027; fill-opacity: .32; color: #a51f1a; weight: 2; }
     .refpoint-icon { background: transparent; border: 0; }
+    .target-point-icon { background: transparent; border: 0; }
     .refpoint-badge { display: flex; width: 28px; height: 28px; align-items: center; justify-content: center;
                        border: 2px solid white; border-radius: 50%; color: white; background: #a51f1a;
                        box-shadow: 0 1px 5px #0008; font-size: 13px; font-weight: 700; }
@@ -136,6 +137,7 @@
     const gridCellLayer = L.layerGroup().addTo(map);
     const gridCellLayers = new Map();
     let refPointMarkers = [];
+    let targetPointMarker = null;
     const refPointOutline = L.polyline([], {
       color: "#1457c5", weight: 3, opacity: 0.9, interactive: false
     }).addTo(map);
@@ -291,6 +293,31 @@
               gridCellLayers.delete(key);
             }
           }
+        }
+        if (data.target_point) {
+          const target = data.target_point;
+          const targetTooltip = `Target · E ${target.easting_m.toFixed(2)} m, N ${target.northing_m.toFixed(2)} m`;
+          if (!targetPointMarker) {
+            const targetIcon = L.icon({
+              iconUrl: "/gps.png",
+              iconSize: [48, 48],
+              // The pin tip is about 82% down the source image; anchor it to the target coordinate.
+              iconAnchor: [24, 39]
+            });
+            targetPointMarker = L.marker([target.lat, target.lon], { icon: targetIcon })
+              .bindTooltip(targetTooltip)
+              .addTo(map);
+            targetPointMarker._targetTooltip = targetTooltip;
+          } else {
+            targetPointMarker.setLatLng([target.lat, target.lon]);
+            if (targetPointMarker._targetTooltip !== targetTooltip) {
+              targetPointMarker.getTooltip().setContent(targetTooltip);
+              targetPointMarker._targetTooltip = targetTooltip;
+            }
+          }
+        } else if (targetPointMarker) {
+          targetPointMarker.remove();
+          targetPointMarker = null;
         }
         if (data.reference_points_configured === false) {
           refPointLayer.clearLayers();

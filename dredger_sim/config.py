@@ -5,6 +5,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 HTML_PATH = PROJECT_DIR / "mappa.html"
 CURSOR_IMAGE_PATH = PROJECT_DIR / "DRP ombra.png"
+TARGET_IMAGE_PATH = PROJECT_DIR / "gps.png"
 
 HOST = "127.0.0.1"
 

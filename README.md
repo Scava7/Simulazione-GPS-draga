@@ -88,6 +88,8 @@ Il TCP è un flusso di byte: una singola chiamata `Read()` nel PLC può ricevere
 
 La mappa parte dal Lago Inferiore (circa 45.1515, 10.8158), ma puoi navigare in altre zone. Questa versione usa tessere online: non carica ancora `Lago_Inferiore.osm` offline.
 
+Il punto target letto da IO.GPS.Sts.TargetPos_UTM_Relative è mostrato sulla mappa con un marker T. Le coordinate relative vengono sommate agli offset UTM; se East e North sono entrambi zero, il marker viene rimosso.
+
 La pagina comunica con Python attraverso un server HTTP locale limitato a `127.0.0.1`. Il server TCP personalizzato è invece raggiungibile dalla rete del PLC; non implementa autenticazione o cifratura, quindi usalo solo sulla rete di prova isolata.
 
 L'uso delle tessere OpenStreetMap segue la [Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/); sulla mappa è mostrata l'attribuzione.

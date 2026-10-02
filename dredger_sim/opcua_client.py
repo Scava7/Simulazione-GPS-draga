@@ -49,10 +49,13 @@ async def _resolve_opcua_nodes(client):
     sts = await _find_child(gps, "Sts")
     cfg = await _find_child(gps, "Cfg")
     ref_points = await _find_child(cfg, "stRef_Points")
+    target_relative = await _find_child(sts, "TargetPos_UTM_Relative")
     grid_root = await _browse_symbol_path(client.nodes.objects, ["GVL", "GPS_Grid_data"])
     return {
         "UTM_North_Offset": await _find_child(sts, "UTM_North_Offset"),
         "UTM_East_Offset": await _find_child(sts, "UTM_East_Offset"),
+        "Target_East": await _find_child(target_relative, "East"),
+        "Target_North": await _find_child(target_relative, "North"),
         "UTM_North_ref_points": await _find_child(ref_points, "UTM_North"),
         "UTM_East_ref_points": await _find_child(ref_points, "UTM_East"),
         "UTM_Zone": await _find_child(cfg, "UTM_Zone"),
