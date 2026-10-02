@@ -38,6 +38,10 @@
     .dredger-leaflet-icon { background: transparent; border: 0; }
     .dredger-leaflet-icon { overflow: visible; }
     .dredger-image { display: block; width: 72px; height: 72px; object-fit: contain; }
+    .refpoint-icon { background: transparent; border: 0; }
+    .refpoint-badge { display: flex; width: 28px; height: 28px; align-items: center; justify-content: center;
+                       border: 2px solid white; border-radius: 50%; color: white; background: #a51f1a;
+                       box-shadow: 0 1px 5px #0008; font-size: 13px; font-weight: 700; }
     .dredger-label { position: absolute; left: 50%; top: 72px; transform: translateX(-50%);
                      padding: 2px 5px; color: #fff; background: #8f211d; border-radius: 3px;
                      font-size: 10px; font-weight: 700; white-space: nowrap; }
@@ -93,13 +97,20 @@
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script>
     const APP_TOKEN = "__APP_TOKEN__";
-    const map = L.map("map", { preferCanvas: true }).setView([45.1515, 10.8158], 13);
+    const map = L.map("map", { preferCanvas: true, minZoom: 1, maxZoom: 22 }).setView([45.1515, 10.8158], 13);
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
+      maxNativeZoom: 19,
+      maxZoom: 22,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }).addTo(map);
 
+    L.control.scale({ position: "bottomleft", metric: true, imperial: false }).addTo(map);
     let dredgerMarker = null;
+    const refPointLayer = L.layerGroup().addTo(map);
+    let refPointMarkers = [];
+    const refPointOutline = L.polyline([], {
+      color: "#1457c5", weight: 3, opacity: 0.9, interactive: false
+    }).addTo(map);
     const statusBox = document.getElementById("status");
 
     function setStatus(message, kind = "") {
@@ -160,6 +171,27 @@
         const data = await response.json();
         box.textContent = data.error ? `OPC UA: ${data.error}` : `OPC UA: ${data.status}`;
         box.className = `coordinates${data.error ? " error" : " success"}`;
+        if (data.coordinates_error) {
+          box.textContent += ` · Punti: ${data.coordinates_error}`;
+        }
+        if (data.ref_points) {
+          const outline = data.ref_points.map(point => [point.lat, point.lon]);
+          if (outline.length === 4) refPointOutline.setLatLngs([...outline, outline[0]]);
+          for (const point of data.ref_points) {
+            const tooltip = `Punto ${point.number} — E ${point.easting_m.toFixed(2)} m, N ${point.northing_m.toFixed(2)} m`;
+            if (!refPointMarkers[point.number - 1]) {
+              const icon = L.divIcon({
+                className: "refpoint-icon",
+                html: `<span class="refpoint-badge">${point.number}</span>`,
+                iconSize: [28, 28], iconAnchor: [14, 14]
+              });
+              refPointMarkers[point.number - 1] = L.marker([point.lat, point.lon], { icon }).addTo(refPointLayer);
+            } else {
+              refPointMarkers[point.number - 1].setLatLng([point.lat, point.lon]);
+            }
+            refPointMarkers[point.number - 1].bindTooltip(tooltip);
+          }
+        }
         if (!data.values) return;
         for (const [name, id] of Object.entries(opcuaFields)) {
           document.getElementById(id).textContent = `${name}: ${data.values[name] ?? "—"}`;
@@ -180,3 +212,4 @@
   </script>
 </body>
 </html>
+

@@ -165,6 +165,7 @@ async def _resolve_opcua_nodes(client):
         "UTM_East_Offset": await _find_child(sts, "UTM_East_Offset"),
         "UTM_North_ref_points": await _find_child(ref_points, "UTM_North"),
         "UTM_East_ref_points": await _find_child(ref_points, "UTM_East"),
+        "UTM_Zone": await _find_child(cfg, "UTM_Zone"),
     }
 
 
@@ -181,6 +182,44 @@ async def _read_opcua_values(nodes) -> dict[str, Any]:
         else:
             values[name] = int(value)
     return values
+
+
+def _reference_points_for_map(values: dict[str, Any]) -> list[dict[str, Any]]:
+    """Combine PLC UTM offsets and relative INT arrays, then convert to WGS84."""
+    norths = values["UTM_North_ref_points"]
+    easts = values["UTM_East_ref_points"]
+    zone = int(values["UTM_Zone"])
+    north_offset = int(values["UTM_North_Offset"])
+    east_offset = int(values["UTM_East_Offset"])
+    points = []
+
+    for index, (north_delta, east_delta) in enumerate(zip(norths, easts), start=1):
+        north_raw = north_offset + int(north_delta)
+        east_raw = east_offset + int(east_delta)
+        magnitude = abs(north_raw)
+        if magnitude < 10_000_000:
+            divisor = 1       # metri
+        elif magnitude < 100_000_000:
+            divisor = 10      # decimetri
+        elif magnitude < 1_000_000_000:
+            divisor = 100     # centimetri
+        else:
+            divisor = 1000    # millimetri
+
+        northing_m = north_raw / divisor
+        easting_m = east_raw / divisor
+        lat, lon = utm.to_latlon(easting_m, northing_m, zone, northern=True)
+        points.append({
+            "number": index,
+            "lat": lat,
+            "lon": lon,
+            "easting_m": easting_m,
+            "northing_m": northing_m,
+            "raw_northing": north_raw,
+            "raw_easting": east_raw,
+            "raw_units_per_meter": divisor,
+        })
+    return points
 
 
 async def _opcua_poll_loop(state: AppState):
@@ -248,9 +287,15 @@ class SimulatorHandler(BaseHTTPRequestHandler):
                 values = self.state.opcua_values.copy()
                 error = self.state.opcua_error
                 updated_at = self.state.opcua_updated_at
-            self._json_response(200, {"ok": True, "values": values, "status": error,
-                                      "error": error if error != "Lettura attiva" else None,
-                                      "updated_at": updated_at})
+            payload = {"ok": True, "values": values, "status": error,
+                       "error": error if error != "Lettura attiva" else None,
+                       "updated_at": updated_at}
+            if values:
+                try:
+                    payload["ref_points"] = _reference_points_for_map(values)
+                except Exception as exc:
+                    payload["coordinates_error"] = str(exc)
+            self._json_response(200, payload)
             return
         if path not in ("/", "/mappa.html"):
             self.send_error(404)
