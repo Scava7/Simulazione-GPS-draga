@@ -292,7 +292,11 @@
             }
           }
         }
-        if (data.ref_points) {
+        if (data.reference_points_configured === false) {
+          refPointLayer.clearLayers();
+          refPointMarkers = [];
+          refPointOutline.setLatLngs([]);
+        } else if (data.ref_points) {
           const outline = data.ref_points.map(point => [point.lat, point.lon]);
           if (outline.length === 4) refPointOutline.setLatLngs([...outline, outline[0]]);
           for (const point of data.ref_points) {
