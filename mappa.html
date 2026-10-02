@@ -19,6 +19,12 @@
     input { width: 100%; height: 36px; border: 1px solid #cbd3dc; border-radius: 6px; padding: 0 9px;
             font: inherit; font-size: 14px; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .drive-grid { display: grid; grid-template-columns: repeat(3, 54px); justify-content: center; gap: 5px; margin-top: 10px; }
+    .drive-grid button { width: 54px; min-height: 44px; margin: 0; font-size: 20px; }
+    .drive-grid .blank { visibility: hidden; }
+    .rotation-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .rotation-controls button { margin-top: 6px; }
+    .drive-settings { margin-top: 8px; }
     button { width: 100%; min-height: 38px; margin-top: 9px; border: 0; border-radius: 6px;
              font: inherit; font-weight: 600; cursor: pointer; }
     button.primary { background: #1769aa; color: white; }
@@ -65,7 +71,24 @@
       <div id="utm-zone">UTM: —</div>
       <div id="easting">Easting: —</div>
       <div id="northing">Northing: —</div>
+      <div id="heading">Heading (HDT): 0°</div>
     </div>
+
+    <h2>Comandi draga</h2>
+    <div class="row drive-settings">
+      <div><label for="move-step">Passo movimento (m)</label><input id="move-step" type="number" min="0.1" max="1000" step="0.1" value="1"></div>
+      <div><label for="turn-step">Passo rotazione (°)</label><input id="turn-step" type="number" min="1" max="180" step="1" value="5"></div>
+    </div>
+    <div class="drive-grid" aria-label="Spostamento nelle direzioni cardinali">
+      <span class="blank"></span><button class="secondary drive-button" data-move="north" title="Nord">↑</button><span class="blank"></span>
+      <button class="secondary drive-button" data-move="west" title="Ovest">←</button><button class="secondary" disabled>·</button><button class="secondary drive-button" data-move="east" title="Est">→</button>
+      <span class="blank"></span><button class="secondary drive-button" data-move="south" title="Sud">↓</button><span class="blank"></span>
+    </div>
+    <div class="rotation-controls">
+      <button class="secondary drive-button" data-turn="-1">↶ Ruota a sinistra</button>
+      <button class="secondary drive-button" data-turn="1">↷ Ruota a destra</button>
+    </div>
+    <div class="subtitle" style="margin:7px 0 0">Le frecce spostano lungo Nord/Sud/Est/Ovest UTM. Ogni pressione applica il passo impostato.</div>
 
     <h2>Letture OPC UA — PLC</h2>
     <div class="coordinates" id="opcua-status">Connessione OPC UA in avvio…</div>
@@ -108,6 +131,7 @@
 
     L.control.scale({ position: "bottomleft", metric: true, imperial: false }).addTo(map);
     let dredgerMarker = null;
+    let currentHeading = 0;
     const refPointLayer = L.layerGroup().addTo(map);
     const gridCellLayer = L.layerGroup().addTo(map);
     const gridCellLayers = new Map();
@@ -133,33 +157,67 @@
       return data;
     }
 
-    map.on("click", async (event) => {
-      const { lat, lng } = event.latlng;
+    function updateDredgerMarker(lat, lon, heading = currentHeading) {
       const icon = L.divIcon({
         className: "dredger-leaflet-icon",
-        html: '<img class="dredger-image" src="/DRP%20ombra.png" alt=""><span class="dredger-label">DRAGA</span>',
-        iconSize: [72, 94],
-        iconAnchor: [36, 36]
+        html: `<img class="dredger-image" src="/DRP%20ombra.png" style="transform:rotate(${heading}deg)" alt=""><span class="dredger-label">DRAGA</span>`,
+        iconSize: [72, 94], iconAnchor: [36, 36]
       });
-      if (!dredgerMarker) dredgerMarker = L.marker([lat, lng], { icon }).addTo(map);
-      else dredgerMarker.setLatLng([lat, lng]).setIcon(icon);
+      if (!dredgerMarker) dredgerMarker = L.marker([lat, lon], { icon }).addTo(map);
+      else dredgerMarker.setLatLng([lat, lon]).setIcon(icon);
       document.getElementById("latitude").textContent = `Latitudine: ${lat.toFixed(7)}°`;
-      document.getElementById("longitude").textContent = `Longitudine: ${lng.toFixed(7)}°`;
+      document.getElementById("longitude").textContent = `Longitudine: ${lon.toFixed(7)}°`;
+      document.getElementById("heading").textContent = `Heading (HDT): ${heading}°`;
+      document.querySelectorAll(".drive-button").forEach(button => { button.disabled = false; });
+    }
+
+    async function showPositionResult(data) {
+      const p = data.position;
+      currentHeading = p.heading_deg;
+      updateDredgerMarker(p.lat, p.lon, currentHeading);
+      document.getElementById("utm-zone").textContent = `UTM: zona ${p.zone}${p.band}`;
+      document.getElementById("easting").textContent = `Easting: ${p.easting.toFixed(2)} m`;
+      document.getElementById("northing").textContent = `Northing: ${p.northing.toFixed(2)} m`;
+      document.getElementById("tcp-message").textContent = data.tcp_line;
+    }
+
+    map.on("click", async (event) => {
+      const { lat, lng } = event.latlng;
       setStatus("Calcolo coordinate UTM…");
       try {
         const data = await postJson("/api/position", { lat, lon: lng });
-        const p = data.position;
-        document.getElementById("utm-zone").textContent = `UTM: zona ${p.zone}${p.band}`;
-        document.getElementById("easting").textContent = `Easting: ${p.easting.toFixed(2)} m`;
-        document.getElementById("northing").textContent = `Northing: ${p.northing.toFixed(2)} m`;
-        document.getElementById("tcp-message").textContent = data.tcp_line;
-        setStatus(`Posizione aggiornata. La stringa sarà inviata al PLC ogni 5 secondi. E=${p.easting_cm} cm, N=${p.northing_cm} cm.`, "success");
-      } catch (error) {
-        document.getElementById("utm-zone").textContent = "UTM: non disponibile";
-        document.getElementById("easting").textContent = "Easting: —";
-        document.getElementById("northing").textContent = "Northing: —";
-        setStatus(error.message, "error");
-      }
+        await showPositionResult(data);
+        setStatus(`Posizione aggiornata. E=${data.position.easting_cm} cm, N=${data.position.northing_cm} cm; direzione ${currentHeading}°.`, "success");
+      } catch (error) { setStatus(error.message, "error"); }
+    });
+
+    document.querySelectorAll(".drive-button").forEach(button => { button.disabled = true; });
+    document.querySelectorAll(".drive-button[data-move]").forEach(button => {
+      button.addEventListener("click", async () => {
+        const step = Number(document.getElementById("move-step").value);
+        if (!Number.isFinite(step) || step <= 0 || step > 1000) {
+          setStatus("Imposta un passo di movimento tra 0,1 e 1000 metri.", "error"); return;
+        }
+        const delta = { north: [0, step], south: [0, -step], east: [step, 0], west: [-step, 0] }[button.dataset.move];
+        try {
+          const data = await postJson("/api/drive", { delta_east_m: delta[0], delta_north_m: delta[1] });
+          await showPositionResult(data);
+          setStatus(`Draga spostata di ${step} m verso ${button.dataset.move}.`, "success");
+        } catch (error) { setStatus(error.message, "error"); }
+      });
+    });
+    document.querySelectorAll(".drive-button[data-turn]").forEach(button => {
+      button.addEventListener("click", async () => {
+        const step = Number(document.getElementById("turn-step").value);
+        if (!Number.isInteger(step) || step < 1 || step > 180) {
+          setStatus("Imposta un passo di rotazione intero tra 1 e 180 gradi.", "error"); return;
+        }
+        try {
+          const data = await postJson("/api/drive", { heading_delta_deg: Number(button.dataset.turn) * step });
+          await showPositionResult(data);
+          setStatus(`Direzione aggiornata a ${currentHeading}°; HDT inviato al PLC.`, "success");
+        } catch (error) { setStatus(error.message, "error"); }
+      });
     });
 
     const opcuaFields = {

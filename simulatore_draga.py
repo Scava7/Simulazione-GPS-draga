@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import secrets
 import shutil
@@ -57,6 +58,7 @@ class AppState:
     def __init__(self):
         self.lock = threading.Lock()
         self.position: dict[str, Any] | None = None
+        self.heading_deg = 0
         self.token = secrets.token_urlsafe(32)
         self.stop_event = threading.Event()
         self.tcp_ready = threading.Event()
@@ -79,12 +81,13 @@ class AppState:
             zone = position["zone"]
             band = position["band"]
             band_number = ord(band) if band else 0
+            heading = int(round(position.get("heading_deg", 0) * 100))
         else:
-            north = east = zone = band_number = 0
+            north = east = zone = band_number = heading = 0
             band = ""
 
         # Campi non ancora simulati: zero provvisorio.
-        fields = [north, east, 0, zone, band, band_number, 0, 0, 15, 0]
+        fields = [north, east, 0, zone, band, band_number, heading, 0, 15, 0]
         return (";".join(str(v) for v in fields) + "\r\n").encode("ascii")
 
 
@@ -476,10 +479,13 @@ class SimulatorHandler(BaseHTTPRequestHandler):
                 raise ValueError("Formato richiesta non valido.")
 
             path = urllib.parse.urlparse(self.path).path
-            if path != "/api/position":
+            if path == "/api/position":
+                result = self._set_position(data)
+            elif path == "/api/drive":
+                result = self._drive_position(data)
+            else:
                 self.send_error(404)
                 return
-            result = self._set_position(data)
             self._json_response(200, {"ok": True, **result})
         except ValueError as exc:  # include JSONDecodeError
             self._json_response(400, {"ok": False, "error": str(exc)})
@@ -495,9 +501,12 @@ class SimulatorHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Posizione non convertibile in UTM: {exc}") from exc
 
+        with self.state.lock:
+            heading = self.state.heading_deg
+
         position = {
             "lat": lat, "lon": lon, "easting": easting, "northing": northing,
-            "zone": zone, "band": band,
+            "zone": zone, "band": band, "heading_deg": heading,
             "easting_cm": round(easting * COORDINATE_SCALE),
             "northing_cm": round(northing * COORDINATE_SCALE),
         }
@@ -508,6 +517,45 @@ class SimulatorHandler(BaseHTTPRequestHandler):
                 "message": "Posizione pronta per il prossimo invio TCP.",
                 "tcp_line": line}
 
+    def _drive_position(self, data: dict[str, Any]) -> dict[str, Any]:
+        def finite_number(name: str, default: float = 0.0) -> float:
+            value = data.get(name, default)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} deve essere numerico.")
+            result = float(value)
+            if not math.isfinite(result):
+                raise ValueError(f"{name} non è valido.")
+            return result
+
+        delta_east = finite_number("delta_east_m")
+        delta_north = finite_number("delta_north_m")
+        heading_delta = finite_number("heading_delta_deg")
+        if abs(delta_east) > 1000 or abs(delta_north) > 1000:
+            raise ValueError("Ogni comando di movimento è limitato a 1000 metri.")
+        if abs(heading_delta) > 180:
+            raise ValueError("Ogni comando di rotazione è limitato a 180 gradi.")
+
+        with self.state.lock:
+            current = self.state.position.copy() if self.state.position else None
+            heading = (self.state.heading_deg + heading_delta) % 360
+            self.state.heading_deg = round(heading, 6)
+            if current is None:
+                raise ValueError("Prima scegli la posizione iniziale cliccando sulla mappa.")
+
+            easting, northing, zone, _band = utm.from_latlon(current["lat"], current["lon"])
+            easting += delta_east
+            northing += delta_north
+            lat, lon = utm.to_latlon(easting, northing, zone, northern=current["lat"] >= 0)
+            current.update({
+                "lat": lat, "lon": lon, "easting": easting, "northing": northing,
+                "zone": zone, "heading_deg": self.state.heading_deg,
+                "easting_cm": round(easting * COORDINATE_SCALE),
+                "northing_cm": round(northing * COORDINATE_SCALE),
+            })
+            self.state.position = current
+
+        line = self.state.tcp_message().decode("ascii").rstrip("\r\n")
+        return {"position": current, "message": "Comando draga applicato.", "tcp_line": line}
     def log_message(self, format, *args):
         return
 
